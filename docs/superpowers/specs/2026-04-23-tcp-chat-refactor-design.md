@@ -358,32 +358,33 @@ General rule:
 
 Client-to-server payloads:
 
-- `AUTH|LOGIN|<username>|<password>`
-- `AUTH|REGISTER|<username>|<password>`
-- `CHAT|PUBLIC|<content>`
-- `CHAT|PRIVATE_ENTER|<target>`
-- `CHAT|PRIVATE|<target>|<content>`
-- `USER|LIST`
-- `SESSION|QUIT`
+- `LOGIN|<username>|<password>`
+- `REGISTER|<username>|<password>`
+- `PUBLIC|<content>`
+- `PRIVATE_ENTER|<target>`
+- `PRIVATE|<target>|<content>`
+- `LIST`
+- `QUIT`
 
 Server-to-client payloads:
 
-- `AUTH|OK|LOGIN`
-- `AUTH|OK|REGISTER`
-- `AUTH|ERR|USER_NOT_FOUND`
-- `AUTH|ERR|NAME_EXISTS`
-- `AUTH|ERR|PASSWORD_INCORRECT`
-- `AUTH|ERR|ALREADY_ONLINE`
-- `AUTH|ERR|INVALID_USERNAME`
-- `AUTH|ERR|INVALID_PASSWORD`
-- `AUTH|ERR|DB_ERROR`
-- `SYSTEM|INFO|<message>`
-- `SYSTEM|ERR|<message>`
-- `CHAT|PUBLIC|<sender>|<content>`
-- `CHAT|PRIVATE|<sender>|<content>`
-- `CHAT|PRIVATE_ACK|<target>|<content>`
-- `USER|LIST|<comma-separated-users>`
-- `SERVER|SHUTDOWN|Server is shutting down`
+- `OK|LOGIN`
+- `OK|REGISTER`
+- `ERR|USER_NOT_FOUND`
+- `ERR|NAME_EXISTS`
+- `ERR|PASSWORD_INCORRECT`
+- `ERR|ALREADY_ONLINE`
+- `ERR|INVALID_USERNAME`
+- `ERR|INVALID_PASSWORD`
+- `ERR|DB_ERROR`
+- `SYSTEM|<message>`
+- `PUBLIC|<sender>|<content>`
+- `PRIVATE|<sender>|<content>`
+- `PRIVATE_ACK|<target>|<content>`
+- `PRIVATE_ENTER_OK|<target>`
+- `PRIVATE_ENTER_ERR|<code>`
+- `LIST|<comma-separated-users>`
+- `SHUTDOWN|Server is shutting down`
 
 ## 9. Database Design
 
