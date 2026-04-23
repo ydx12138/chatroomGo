@@ -55,6 +55,7 @@ func main() {
 	// 如果主菜单返回错误，需要判断是用户主动退出还是异常错误。
 	if err != nil {
 		// errClientExit 表示正常退出，不需要打印异常信息。
+		//如果err是errClientExit，则是正常的退出，否则就就是异常退出
 		if !errors.Is(err, errClientExit) {
 			// 其他错误才说明客户端异常。
 			fmt.Println("[系统] 客户端异常退出:", err)
@@ -83,10 +84,10 @@ func main() {
 // 默认连接 localhost:8888；如果设置了 CHAT_SERVER_ADDR，就使用环境变量。
 func serverAddr() string {
 	// 先读取环境变量，方便跨机器测试。
-	if addr := os.Getenv("CHAT_SERVER_ADDR"); addr != "" {
-		// 环境变量非空就直接使用。
-		return addr
-	}
+	//if addr := os.Getenv("CHAT_SERVER_ADDR"); addr != "" {
+	//	// 环境变量非空就直接使用。
+	//	return addr
+	//}
 	// 没有配置环境变量时使用默认地址。
 	return defaultServerAddr
 }
@@ -163,7 +164,7 @@ func doAuthFlow(reader *bufio.Reader, action string) (string, net.Conn, error) {
 	}
 
 	// 构造认证请求，并通过 pre.WritePacket 发送。
-	if err := sendPayload(conn, protocol.BuildAuthRequest(action, username, password)); err != nil {
+	if err := sendPayload(conn, protocol.MakePacket(action, username, password)); err != nil {
 		// 发送失败时，这条连接已经不能继续用，必须关闭。
 		_ = conn.Close()
 		return "", nil, fmt.Errorf("发送认证请求失败: %w", err)
@@ -314,17 +315,17 @@ func handleChatInput(conn net.Conn, session *clientSession, line string) (bool, 
 	switch cmd.Action {
 	case protocol.CmdPublic:
 		// 公聊普通消息：发给服务端，由服务端广播。
-		return false, sendPayload(conn, protocol.BuildPublicMessage(cmd.Text))
+		return false, sendPayload(conn, protocol.MakePacket(protocol.CmdPublic, cmd.Text))
 	case protocol.CmdPrivate:
 		// 私聊普通消息：目标固定为当前 privateTarget。
-		return false, sendPayload(conn, protocol.BuildPrivateMessage(session.privateTarget, cmd.Text))
+		return false, sendPayload(conn, protocol.MakePacket(protocol.CmdPrivate, session.privateTarget, cmd.Text))
 	case protocol.CmdList:
 		// /list：请求服务端返回在线用户列表。
-		return false, sendPayload(conn, protocol.BuildListRequest())
+		return false, sendPayload(conn, protocol.CmdList)
 	case protocol.CmdPrivateEnter:
 		// /chat 用户名：先标记等待，再请求服务端校验目标是否在线。
 		session.waitingPrivate = true
-		return false, sendPayload(conn, protocol.BuildPrivateEnterRequest(cmd.Target))
+		return false, sendPayload(conn, protocol.MakePacket(protocol.CmdPrivateEnter, cmd.Target))
 	case protocol.InputLeavePrivate:
 		// 私聊状态下 /exit：只退出私聊，不退出客户端。
 		session.mode = protocol.ChatModePublic
@@ -337,7 +338,7 @@ func handleChatInput(conn net.Conn, session *clientSession, line string) (bool, 
 		return false, nil
 	case protocol.InputExitClient:
 		// 公聊状态下 /exit：通知服务端退出会话。
-		_ = sendPayload(conn, protocol.BuildQuitRequest())
+		_ = sendPayload(conn, protocol.CmdQuit)
 		// 返回 true 让 runChat 结束客户端。
 		return true, nil
 	default:

@@ -273,89 +273,12 @@ func ParseChatInput(mode ChatMode, input string) (InputCommand, error) {
 	return InputCommand{Action: CmdPublic, Text: input}, nil
 }
 
-// BuildAuthRequest 构造登录或注册请求。
-func BuildAuthRequest(cmd, username, password string) string {
-	return strings.Join([]string{cmd, username, password}, "|")
-}
-
-// BuildPublicMessage 构造客户端公聊消息。
-func BuildPublicMessage(content string) string {
-	return strings.Join([]string{CmdPublic, content}, "|")
-}
-
-// BuildPrivateEnterRequest 构造进入私聊请求。
-func BuildPrivateEnterRequest(target string) string {
-	return strings.Join([]string{CmdPrivateEnter, target}, "|")
-}
-
-// BuildPrivateMessage 构造客户端私聊消息。
-func BuildPrivateMessage(target, content string) string {
-	return strings.Join([]string{CmdPrivate, target, content}, "|")
-}
-
-// BuildListRequest 构造在线列表请求。
-func BuildListRequest() string {
-	return CmdList
-}
-
-// BuildQuitRequest 构造客户端退出请求。
-func BuildQuitRequest() string {
-	return CmdQuit
-}
-
-// BuildAuthOK 构造认证成功响应。
-func BuildAuthOK(action string) string {
-	return strings.Join([]string{CmdOK, action}, "|")
-}
-
-// BuildAuthErr 构造认证失败响应。
-func BuildAuthErr(code string) string {
-	return strings.Join([]string{CmdErr, code}, "|")
-}
-
-// BuildSystemInfo 构造系统提示消息。
-func BuildSystemInfo(message string) string {
-	return strings.Join([]string{CmdSystem, message}, "|")
-}
-
-// BuildSystemErr 构造系统错误消息。
-func BuildSystemErr(message string) string {
-	return strings.Join([]string{CmdSystem, message}, "|")
-}
-
-// BuildPublicBroadcast 构造服务端公聊广播消息。
-func BuildPublicBroadcast(sender, content string) string {
-	return strings.Join([]string{CmdPublic, sender, content}, "|")
-}
-
-// BuildPrivateInbound 构造发给私聊接收者的消息。
-func BuildPrivateInbound(sender, content string) string {
-	return strings.Join([]string{CmdPrivate, sender, content}, "|")
-}
-
-// BuildPrivateAck 构造发给私聊发送者的回执。
-func BuildPrivateAck(target, content string) string {
-	return strings.Join([]string{CmdPrivateAck, target, content}, "|")
-}
-
-// BuildPrivateEnterOK 构造进入私聊成功响应。
-func BuildPrivateEnterOK(target string) string {
-	return strings.Join([]string{CmdPrivateEnterOK, target}, "|")
-}
-
-// BuildPrivateEnterErr 构造进入私聊失败响应。
-func BuildPrivateEnterErr(code string) string {
-	return strings.Join([]string{CmdPrivateEnterErr, code}, "|")
-}
-
-// BuildUserList 构造在线用户列表响应。
-func BuildUserList(users []string) string {
-	return strings.Join([]string{CmdList, strings.Join(users, ",")}, "|")
-}
-
-// BuildShutdown 构造服务端关闭通知。
-func BuildShutdown(message string) string {
-	return strings.Join([]string{CmdShutdown, message}, "|")
+// MakePacket 用来拼协议字符串。
+// 以前这里有很多 BuildXXX 函数，功能都只是 strings.Join。
+// 现在统一成一个简单函数，调用处直接写命令名和字段，更容易看。
+func MakePacket(cmd string, fields ...string) string {
+	parts := append([]string{cmd}, fields...)
+	return strings.Join(parts, "|")
 }
 
 func firstField(raw string) string {

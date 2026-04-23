@@ -123,6 +123,13 @@ func TestParseServerPacket(t *testing.T) {
 	}
 }
 
+func TestMakePacket(t *testing.T) {
+	got := MakePacket(CmdPrivate, "bob", "hello")
+	if got != "PRIVATE|bob|hello" {
+		t.Fatalf("expected PRIVATE|bob|hello, got %q", got)
+	}
+}
+
 func TestParseChatInput(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -22,22 +22,22 @@ type clientConn struct {
 	// username 登录成功前为空字符串，登录成功后保存用户名。
 	username string
 	// writeMu 保护当前连接的写操作。
-	// 只要服务端要给这个客户端发消息，都必须先拿到这个锁。
+	// 只要服务端要给这个客户端发消息，都必须先拿到这个互斥锁。
 	writeMu sync.Mutex
 }
 
 // chatServer 表示整个聊天服务端实例。
 // 它把监听器、在线用户表、关闭控制都集中管理起来。
 type chatServer struct {
-	// listener 负责接收新的 TCP 连接。
+	// listener 监听
 	listener net.Listener
-	// peersByConn 按连接查客户端对象。
+	// peersByConn 按连接查客户端对象，
 	// 未登录和已登录的连接都会放进这个表，方便关服时统一关闭。
 	peersByConn map[net.Conn]*clientConn
 	// peersByName 按用户名查客户端对象。
 	// 只有登录成功的用户才会放进这个表，私聊和 /list 都依赖它。
 	peersByName map[string]*clientConn
-	// mu 保护 peersByConn 和 peersByName 两张表。
+	// mu 读写互斥锁保护 peersByConn 和 peersByName 两张表。
 	mu sync.RWMutex
 	// shutdownCh 关闭后表示服务端正在停机。
 	shutdownCh chan struct{}
@@ -65,11 +65,11 @@ func main() {
 	}()
 
 	// 确保 user/news 表和用户名唯一索引存在。
-	if err := mysql.EnsureSchema(); err != nil {
-		// 表结构初始化失败时，后续注册和聊天记录都无法保证正常。
-		fmt.Println("初始化数据表失败:", err)
-		return
-	}
+	//if err := mysql.EnsureSchema(); err != nil {
+	//	// 表结构初始化失败时，后续注册和聊天记录都无法保证正常。
+	//	fmt.Println("初始化数据表失败:", err)
+	//	return
+	//}
 
 	// 启动 TCP 监听，监听所有网卡的 8888 端口。
 	listener, err := net.Listen("tcp", "0.0.0.0:8888")
@@ -80,7 +80,17 @@ func main() {
 	}
 
 	// 创建服务端对象，把 listener 和在线表放进去。
-	server := newChatServer(listener)
+	//server := newChatServer(listener)
+	server := &chatServer{
+		// 保存 TCP 监听器。
+		listener: listener,
+		// 初始化连接表。
+		peersByConn: make(map[net.Conn]*clientConn),
+		// 初始化在线用户名表。
+		peersByName: make(map[string]*clientConn),
+		// 初始化停机信号 channel。
+		shutdownCh: make(chan struct{}),
+	}
 	// 打印启动成功提示。
 	fmt.Println("服务端已启动: 0.0.0.0:8888")
 	// 单独启动一个 goroutine 读取服务端控制台命令。
@@ -97,19 +107,20 @@ func main() {
 
 // newChatServer 创建服务端对象。
 // 所有 map 和 channel 都在这里初始化，避免使用时出现 nil。
-func newChatServer(listener net.Listener) *chatServer {
-	// 返回一个完整可用的 chatServer 指针。
-	return &chatServer{
-		// 保存 TCP 监听器。
-		listener: listener,
-		// 初始化连接表。
-		peersByConn: make(map[net.Conn]*clientConn),
-		// 初始化在线用户名表。
-		peersByName: make(map[string]*clientConn),
-		// 初始化停机信号 channel。
-		shutdownCh: make(chan struct{}),
-	}
-}
+// 在这里new一个newChatServer对象
+//func newChatServer(listener net.Listener) *chatServer {
+//	// 返回一个完整可用的 chatServer 指针。
+//	return &chatServer{
+//		// 保存 TCP 监听器。
+//		listener: listener,
+//		// 初始化连接表。
+//		peersByConn: make(map[net.Conn]*clientConn),
+//		// 初始化在线用户名表。
+//		peersByName: make(map[string]*clientConn),
+//		// 初始化停机信号 channel。
+//		shutdownCh: make(chan struct{}),
+//	}
+//}
 
 // serve 持续接收客户端连接。
 // 每接入一个连接，就启动一个 goroutine 独立处理。
@@ -169,7 +180,7 @@ func (s *chatServer) handleConnection(peer *clientConn) {
 		// 解析失败说明客户端发来的协议格式不正确。
 		if err != nil {
 			// 给客户端返回无效命令提示，然后继续等待下一条命令。
-			_ = s.sendPacket(peer, protocol.BuildSystemErr("无效命令"))
+			_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "无效命令"))
 			continue
 		}
 
@@ -206,7 +217,7 @@ func (s *chatServer) handleGuestCommand(peer *clientConn, cmd protocol.Packet) b
 		}
 	default:
 		// 未登录状态下发其他命令，都提示先登录或注册。
-		_ = s.sendPacket(peer, protocol.BuildSystemErr("请先登录或注册"))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "请先登录或注册"))
 	}
 	// 当前设计下，未登录命令不会主动关闭连接。
 	return false
@@ -234,7 +245,7 @@ func (s *chatServer) handleAuthedCommand(peer *clientConn, cmd protocol.Packet) 
 		return true
 	default:
 		// 其他已登录命令都视为无效。
-		_ = s.sendPacket(peer, protocol.BuildSystemErr("无效命令"))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "无效命令"))
 	}
 	// false 表示连接继续保持。
 	return false
@@ -245,12 +256,12 @@ func (s *chatServer) handleAuthedCommand(peer *clientConn, cmd protocol.Packet) 
 func (s *chatServer) handleRegister(peer *clientConn, cmd protocol.Packet) {
 	// 服务端再次校验用户名，防止客户端绕过本地校验。
 	if err := protocol.ValidateUsername(cmd.Username); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeInvalidUsername))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeInvalidUsername))
 		return
 	}
 	// 服务端再次校验密码。
 	if err := protocol.ValidatePassword(cmd.Password); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeInvalidPassword))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeInvalidPassword))
 		return
 	}
 
@@ -260,15 +271,15 @@ func (s *chatServer) handleRegister(peer *clientConn, cmd protocol.Packet) {
 	switch {
 	case err == nil:
 		// 注册成功。
-		_ = s.sendPacket(peer, protocol.BuildAuthOK(protocol.CmdRegister))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdOK, protocol.CmdRegister))
 	case errors.Is(err, mysql.ErrNameExists):
 		// 用户名重复。
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeNameExists))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeNameExists))
 	default:
 		// 其他数据库错误打印到服务端控制台。
 		fmt.Println("注册失败:", err)
 		// 给客户端只返回数据库错误，不暴露底层细节。
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeDBError))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeDBError))
 	}
 }
 
@@ -277,12 +288,12 @@ func (s *chatServer) handleRegister(peer *clientConn, cmd protocol.Packet) {
 func (s *chatServer) handleLogin(peer *clientConn, cmd protocol.Packet) bool {
 	// 服务端再次校验用户名。
 	if err := protocol.ValidateUsername(cmd.Username); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeInvalidUsername))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeInvalidUsername))
 		return false
 	}
 	// 服务端再次校验密码。
 	if err := protocol.ValidatePassword(cmd.Password); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeInvalidPassword))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeInvalidPassword))
 		return false
 	}
 
@@ -291,12 +302,12 @@ func (s *chatServer) handleLogin(peer *clientConn, cmd protocol.Packet) bool {
 	// 数据库查询异常时返回 DB_ERROR。
 	if err != nil {
 		fmt.Println("登录校验失败:", err)
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeDBError))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeDBError))
 		return false
 	}
 	// 登录结果不是成功时，映射成对应错误码返回。
 	if result != mysql.LoginSuccess {
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(mapLoginResultToCode(result)))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, mapLoginResultToCode(result)))
 		return false
 	}
 
@@ -306,7 +317,7 @@ func (s *chatServer) handleLogin(peer *clientConn, cmd protocol.Packet) bool {
 	defer s.mu.Unlock()
 	// 检查当前账号是否已经在线。
 	if _, exists := s.peersByName[cmd.Username]; exists {
-		_ = s.sendPacket(peer, protocol.BuildAuthErr(protocol.CodeAlreadyOnline))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdErr, protocol.CodeAlreadyOnline))
 		return false
 	}
 	// 把用户名写入当前连接对象，标志它进入已登录状态。
@@ -314,7 +325,7 @@ func (s *chatServer) handleLogin(peer *clientConn, cmd protocol.Packet) bool {
 	// 把用户名和连接对象绑定起来，供私聊和 /list 使用。
 	s.peersByName[cmd.Username] = peer
 	// 给客户端返回登录成功。
-	_ = s.sendPacket(peer, protocol.BuildAuthOK(protocol.CmdLogin))
+	_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdOK, protocol.CmdLogin))
 	// true 表示登录成功。
 	return true
 }
@@ -324,7 +335,7 @@ func (s *chatServer) handleLogin(peer *clientConn, cmd protocol.Packet) bool {
 func (s *chatServer) handlePublicMessage(peer *clientConn, cmd protocol.Packet) {
 	// 先校验消息不能为空。
 	if err := protocol.ValidateMessage(cmd.Content); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildSystemErr(err.Error()))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, err.Error()))
 		return
 	}
 	// 保存公聊消息到数据库。
@@ -332,12 +343,12 @@ func (s *chatServer) handlePublicMessage(peer *clientConn, cmd protocol.Packet) 
 		// 服务端记录详细错误。
 		fmt.Println("保存公聊消息失败:", err)
 		// 客户端只收到简短提示。
-		_ = s.sendPacket(peer, protocol.BuildSystemErr("保存消息失败"))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "保存消息失败"))
 		return
 	}
 
 	// 构造广播给客户端的公聊消息包。
-	message := protocol.BuildPublicBroadcast(peer.username, cmd.Content)
+	message := protocol.MakePacket(protocol.CmdPublic, peer.username, cmd.Content)
 	// 取在线用户快照，避免边持锁边写网络。
 	for _, onlinePeer := range s.snapshotOnlinePeers() {
 		// 给每个在线用户发送消息，包括发送者自己。
@@ -350,7 +361,7 @@ func (s *chatServer) handlePublicMessage(peer *clientConn, cmd protocol.Packet) 
 func (s *chatServer) handlePrivateEnter(peer *clientConn, cmd protocol.Packet) {
 	// 私聊目标用户名也必须符合用户名规则。
 	if err := protocol.ValidateUsername(cmd.Target); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildPrivateEnterErr(protocol.CodeInvalidUsername))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateEnterErr, protocol.CodeInvalidUsername))
 		return
 	}
 
@@ -359,12 +370,12 @@ func (s *chatServer) handlePrivateEnter(peer *clientConn, cmd protocol.Packet) {
 	// 按业务规则判断是否允许进入私聊。
 	if code := canEnterPrivateMode(peer.username, cmd.Target, online); code != "" {
 		// 失败时返回具体错误码。
-		_ = s.sendPacket(peer, protocol.BuildPrivateEnterErr(code))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateEnterErr, code))
 		return
 	}
 
 	// 成功时返回目标用户名，让客户端切换私聊模式。
-	_ = s.sendPacket(peer, protocol.BuildPrivateEnterOK(cmd.Target))
+	_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateEnterOK, cmd.Target))
 }
 
 // handlePrivateMessage 处理私聊消息。
@@ -372,12 +383,12 @@ func (s *chatServer) handlePrivateEnter(peer *clientConn, cmd protocol.Packet) {
 func (s *chatServer) handlePrivateMessage(peer *clientConn, cmd protocol.Packet) {
 	// 校验目标用户名。
 	if err := protocol.ValidateUsername(cmd.Target); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildSystemErr("私聊对象无效"))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "私聊对象无效"))
 		return
 	}
 	// 校验消息内容不能为空。
 	if err := protocol.ValidateMessage(cmd.Content); err != nil {
-		_ = s.sendPacket(peer, protocol.BuildSystemErr(err.Error()))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, err.Error()))
 		return
 	}
 
@@ -389,12 +400,12 @@ func (s *chatServer) handlePrivateMessage(peer *clientConn, cmd protocol.Packet)
 	s.mu.RUnlock()
 	// 如果目标不在线，提示发送者退出私聊。
 	if !ok {
-		_ = s.sendPacket(peer, protocol.BuildSystemErr("私聊对象已离线，请输入 /exit 退出私聊"))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "私聊对象已离线，请输入 /exit 退出私聊"))
 		return
 	}
 	// 保险校验：不允许给自己发私聊。
 	if targetPeer.username == peer.username {
-		_ = s.sendPacket(peer, protocol.BuildSystemErr("不能给自己发送私聊"))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "不能给自己发送私聊"))
 		return
 	}
 
@@ -403,14 +414,14 @@ func (s *chatServer) handlePrivateMessage(peer *clientConn, cmd protocol.Packet)
 		// 服务端记录详细错误。
 		fmt.Println("保存私聊消息失败:", err)
 		// 客户端只收到统一提示。
-		_ = s.sendPacket(peer, protocol.BuildSystemErr("保存消息失败"))
+		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "保存消息失败"))
 		return
 	}
 
 	// 给目标用户发送真正的私聊消息。
-	_ = s.sendPacket(targetPeer, protocol.BuildPrivateInbound(peer.username, cmd.Content))
+	_ = s.sendPacket(targetPeer, protocol.MakePacket(protocol.CmdPrivate, peer.username, cmd.Content))
 	// 给发送者发送回执，证明消息已经发出。
-	_ = s.sendPacket(peer, protocol.BuildPrivateAck(targetPeer.username, cmd.Content))
+	_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateAck, targetPeer.username, cmd.Content))
 }
 
 // handleUserList 处理 /list。
@@ -419,7 +430,7 @@ func (s *chatServer) handleUserList(peer *clientConn) {
 	// 获取已排序的在线用户名。
 	names := s.snapshotOnlineUsernames()
 	// 构造成协议包后发给请求者。
-	_ = s.sendPacket(peer, protocol.BuildUserList(names))
+	_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdList, strings.Join(names, ",")))
 }
 
 // addPeer 把新连接加入连接表。
@@ -539,7 +550,7 @@ func (s *chatServer) watchConsoleExit() {
 			return
 		}
 		// 去掉换行后判断是否是 /exit。
-		if isExitCommand(strings.TrimSpace(line)) {
+		if strings.TrimSpace(line) == "/exit" {
 			// 触发服务端优雅关闭。
 			s.shutdownServer("服务器已关闭")
 			return
@@ -558,7 +569,7 @@ func (s *chatServer) shutdownServer(message string) {
 		// 取所有连接快照，包括未登录连接。
 		for _, peer := range s.snapshotAllPeers() {
 			// 先发送关服通知，让客户端能打印“服务器已关闭”。
-			_ = s.sendPacket(peer, protocol.BuildShutdown(message))
+			_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdShutdown, message))
 			// 再关闭客户端连接。
 			_ = peer.conn.Close()
 		}
@@ -642,10 +653,4 @@ func formatUserList(users []string) string {
 	sort.Strings(result)
 	// 用逗号拼接成协议里的用户列表格式。
 	return strings.Join(result, ",")
-}
-
-// isExitCommand 判断服务端控制台命令是否为退出命令。
-func isExitCommand(input string) bool {
-	// 只接受完全等于 /exit 的输入。
-	return input == "/exit"
 }

@@ -97,51 +97,51 @@ func CloseMysql() error {
 
 // EnsureSchema 确保数据库表结构存在。
 // 这里会自动创建 user 表和 news 表，并确保 user.name 有唯一约束。
-func EnsureSchema() error {
-	// 数据库未初始化时不能执行建表。
-	if db == nil {
-		return ErrDBNotReady
-	}
-
-	// statements 保存需要依次执行的建表 SQL。
-	statements := []string{
-		// user 表保存用户名和密码。
-		"CREATE TABLE IF NOT EXISTS `user` (" +
-			// id 是自增主键。
-			"`id` BIGINT PRIMARY KEY AUTO_INCREMENT," +
-			// name 最长 10 位，对应业务层用户名长度限制。
-			"`name` VARCHAR(10) NOT NULL," +
-			// password 最长 10 位，对应业务层密码长度限制。
-			"`password` VARCHAR(10) NOT NULL," +
-			// 唯一索引保证数据库层面不能重名注册。
-			"UNIQUE KEY `uk_user_name` (`name`)" +
-			")",
-		// news 表保存公聊和私聊消息。
-		"CREATE TABLE IF NOT EXISTS `news` (" +
-			// id 是自增主键。
-			"`id` BIGINT PRIMARY KEY AUTO_INCREMENT," +
-			// content 保存消息正文。
-			"`content` TEXT NOT NULL," +
-			// create_time 保存消息创建时间，默认当前时间。
-			"`create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
-			// send_name 保存发送者用户名。
-			"`send_name` VARCHAR(10) NOT NULL," +
-			// receive_name 为空表示公聊，非空表示私聊接收者。
-			"`receive_name` VARCHAR(10) NOT NULL DEFAULT ''" +
-			")",
-	}
-
-	// 依次执行每条建表语句。
-	for _, statement := range statements {
-		// Exec 用于执行不返回行数据的 SQL。
-		if _, err := db.Exec(statement); err != nil {
-			// 任意一条失败都返回错误，服务端启动应该停止。
-			return fmt.Errorf("ensure schema: %w", err)
-		}
-	}
-	// 全部执行成功。
-	return nil
-}
+//func EnsureSchema() error {
+//	// 数据库未初始化时不能执行建表。
+//	if db == nil {
+//		return ErrDBNotReady
+//	}
+//
+//	// statements 保存需要依次执行的建表 SQL。
+//	statements := []string{
+//		// user 表保存用户名和密码。
+//		"CREATE TABLE IF NOT EXISTS `user` (" +
+//			// id 是自增主键。
+//			"`id` BIGINT PRIMARY KEY AUTO_INCREMENT," +
+//			// name 最长 10 位，对应业务层用户名长度限制。
+//			"`name` VARCHAR(10) NOT NULL," +
+//			// password 最长 10 位，对应业务层密码长度限制。
+//			"`password` VARCHAR(10) NOT NULL," +
+//			// 唯一索引保证数据库层面不能重名注册。
+//			"UNIQUE KEY `uk_user_name` (`name`)" +
+//			")",
+//		// news 表保存公聊和私聊消息。
+//		"CREATE TABLE IF NOT EXISTS `news` (" +
+//			// id 是自增主键。
+//			"`id` BIGINT PRIMARY KEY AUTO_INCREMENT," +
+//			// content 保存消息正文。
+//			"`content` TEXT NOT NULL," +
+//			// create_time 保存消息创建时间，默认当前时间。
+//			"`create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+//			// send_name 保存发送者用户名。
+//			"`send_name` VARCHAR(10) NOT NULL," +
+//			// receive_name 为空表示公聊，非空表示私聊接收者。
+//			"`receive_name` VARCHAR(10) NOT NULL DEFAULT ''" +
+//			")",
+//	}
+//
+//	// 依次执行每条建表语句。
+//	for _, statement := range statements {
+//		// Exec 用于执行不返回行数据的 SQL。
+//		if _, err := db.Exec(statement); err != nil {
+//			// 任意一条失败都返回错误，服务端启动应该停止。
+//			return fmt.Errorf("ensure schema: %w", err)
+//		}
+//	}
+//	// 全部执行成功。
+//	return nil
+//}
 
 // RegisterUser 注册新用户。
 // 只负责插入数据库，不负责用户名和密码格式校验，格式校验由 protocol 包完成。
