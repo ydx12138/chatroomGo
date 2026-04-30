@@ -50,6 +50,7 @@ var privateEnterErrors = map[string]string{
 
 // main 先处理登录/注册菜单，登录成功后进入聊天循环。
 func main() {
+
 	reader := bufio.NewReader(os.Stdin)
 	username, conn, err := runMainMenu(reader)
 	if err != nil {

@@ -85,6 +85,58 @@ The server keeps:
 - one write mutex per client connection
 - a shutdown channel and `sync.Once` for graceful stop
 
+## Function Order Reference
+
+The lists below follow the source files from top to bottom.
+
+### `client/client.go`
+
+1. `main()`: Client entry point; connects the menu flow to the chat flow.
+2. `serverAddr() string`: Returns the server address used by the client.
+3. `runMainMenu(reader *bufio.Reader) (string, net.Conn, error)`: Shows the menu and lets the user choose login, register, or exit.
+4. `doAuthFlow(reader *bufio.Reader, action string) (string, net.Conn, error)`: Runs one login or registration attempt and reads the server response.
+5. `promptCredentials(reader *bufio.Reader) (string, string, error)`: Reads the username and password from the terminal.
+6. `runChat(conn net.Conn, reader *bufio.Reader, session *clientSession)`: Runs the chat screen and handles both user input and server messages.
+7. `handleChatInput(conn net.Conn, session *clientSession, line string) (bool, error)`: Handles one line typed by the user in chat.
+8. `readChatInput(reader *bufio.Reader, inputCh chan<- string)`: Keeps reading terminal input and sends it to the chat loop.
+9. `receiveLoop(conn net.Conn, privateEnterCh chan<- privateEnterResult, doneCh chan<- struct{})`: Keeps reading server messages and forwards important results to the chat loop.
+10. `sendPayload(conn net.Conn, payload string) error`: Sends one protocol message to the server.
+11. `readLine(reader *bufio.Reader, prompt string) (string, error)`: Prints a prompt and reads one line.
+12. `printMainMenu()`: Prints the pre-login menu.
+13. `printChatGuide()`: Prints the available commands in chat.
+14. `translateAuthError(code string) string`: Turns login and registration error codes into user-facing messages.
+15. `translatePrivateEnterError(code string) string`: Turns private-chat entry error codes into user-facing messages.
+16. `renderServerPacket(packet protocol.Packet) (string, bool)`: Turns a server packet into text that can be printed in the terminal.
+17. `applyPrivateEnterResult(session *clientSession, result privateEnterResult) string`: Updates local private-chat state after the server confirms or rejects the request.
+
+### `server/server.go`
+
+1. `main()`: Server entry point; prepares the database, listens on the TCP port, and starts the server.
+2. `newChatServer(listener net.Listener) *chatServer`: Creates the maps and shutdown signal used while the server is running.
+3. `serve(server *chatServer) error`: Accepts new clients and starts one goroutine for each client.
+4. `handleConnection(server *chatServer, peer *clientConn)`: Handles the full lifetime of one client connection.
+5. `handleGuestCommand(server *chatServer, peer *clientConn, cmd protocol.Packet) bool`: Handles commands from a client that has not logged in yet.
+6. `handleAuthedCommand(server *chatServer, peer *clientConn, cmd protocol.Packet) bool`: Handles chat commands from a logged-in user.
+7. `handleRegister(peer *clientConn, cmd protocol.Packet)`: Checks registration data and saves the new user.
+8. `handleLogin(server *chatServer, peer *clientConn, cmd protocol.Packet) bool`: Checks username and password, then marks the user as online.
+9. `handlePublicMessage(server *chatServer, peer *clientConn, cmd protocol.Packet)`: Saves a public message and sends it to all online users.
+10. `handlePrivateEnter(server *chatServer, peer *clientConn, cmd protocol.Packet)`: Checks whether the target user can be used for private chat.
+11. `handlePrivateMessage(server *chatServer, peer *clientConn, cmd protocol.Packet)`: Saves a private message and sends it to both users.
+12. `handleUserList(server *chatServer, peer *clientConn)`: Sends the current online user list to the client.
+13. `addPeer(server *chatServer, peer *clientConn)`: Records a newly connected client.
+14. `disconnectPeer(server *chatServer, peer *clientConn)`: Removes a disconnected client and closes its TCP connection.
+15. `sendPacket(peer *clientConn, payload string) error`: Sends one complete protocol message to one client.
+16. `sendErr(peer *clientConn, code string) error`: Sends an `ERR` packet with a specific error code.
+17. `snapshotOnlinePeers(server *chatServer) []*clientConn`: Copies the current online connection list for later broadcasting.
+18. `snapshotOnlineUsernames(server *chatServer) []string`: Copies and sorts the current online usernames.
+19. `snapshotOnlineUserSet(server *chatServer) map[string]struct{}`: Builds a quick lookup set of online usernames.
+20. `watchConsoleExit(server *chatServer)`: Watches server console input for `/exit`.
+21. `shutdownServer(server *chatServer, message string)`: Notifies clients and closes connections and the listener.
+22. `snapshotAllPeers(server *chatServer) []*clientConn`: Copies all connections, including clients that have not logged in.
+23. `isShuttingDown(server *chatServer) bool`: Checks whether server shutdown has already started.
+24. `mapLoginResultToCode(result mysql.LoginResult) string`: Converts the database login result into a client error code.
+25. `canEnterPrivateMode(sender, target string, online map[string]struct{}) string`: Checks whether a private-chat target is valid.
+
 ## Preserved User Behavior
 
 ### Before Login

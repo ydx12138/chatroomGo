@@ -14,16 +14,16 @@ import (
 	"sync"
 )
 
-// clientConn 是服务端保存的单个客户端连接状态。
-// writeMu 保证广播、私聊回执、关服通知等并发写不会交错写入同一条 TCP 连接。
+// clientConn 记录一个客户端连接，以及这个连接登录后的用户名。
+// writeMu 用来保证同一个连接一次只写一条消息，避免多条消息混在一起。
 type clientConn struct {
 	conn     net.Conn
 	username string
 	writeMu  sync.Mutex
 }
 
-// chatServer 集中管理监听器、连接表、在线用户表和关服流程。
-// peersByConn 包含未登录连接，peersByName 只包含已登录用户。
+// chatServer 只保存服务端运行时需要共用的数据。
+// peersByConn 保存所有连接，peersByName 只保存已经登录成功的用户。
 type chatServer struct {
 	listener    net.Listener
 	peersByConn map[net.Conn]*clientConn
@@ -34,7 +34,7 @@ type chatServer struct {
 	closeOnce   sync.Once
 }
 
-// main 初始化数据库和 TCP 监听，然后启动服务端主循环。
+// main 先准备数据库和端口监听，然后开始接收客户端连接。
 func main() {
 	if err := mysql.InitMysql(); err != nil {
 		fmt.Println("初始化数据库失败:", err)
@@ -62,7 +62,7 @@ func main() {
 	server.shutdownWg.Wait()
 }
 
-// newChatServer 初始化服务端运行时状态。
+// newChatServer 创建服务端要用的连接表、用户表和关服信号。
 func newChatServer(listener net.Listener) *chatServer {
 	return &chatServer{
 		listener:    listener,
@@ -72,8 +72,8 @@ func newChatServer(listener net.Listener) *chatServer {
 	}
 }
 
-// serve 接收新连接并为每条连接启动独立处理协程。
-// listener 关闭时 Accept 会返回错误，此时需要和异常退出区分开。
+// serve 一直接收新客户端；每来一个客户端，就单独开一个 goroutine 处理它。
+// 关服时 listener 会被关闭，Accept 返回的错误这时是正常现象，不需要当成程序出错。
 func serve(server *chatServer) error {
 	for {
 		conn, err := server.listener.Accept()
@@ -94,8 +94,8 @@ func serve(server *chatServer) error {
 	}
 }
 
-// handleConnection 处理一个连接从接入、认证到聊天或断开的完整生命周期。
-// 登录前只接受认证命令，登录后才接受聊天相关命令。
+// handleConnection 负责一个客户端连接的完整过程：读消息、判断命令、处理退出。
+// 用户登录前只能发注册或登录命令；登录后才能发聊天、私聊、列表等命令。
 func handleConnection(server *chatServer, peer *clientConn) {
 	defer disconnectPeer(server, peer)
 
@@ -127,7 +127,7 @@ func handleConnection(server *chatServer, peer *clientConn) {
 	}
 }
 
-// handleGuestCommand 路由未登录连接发来的命令。
+// handleGuestCommand 处理还没登录的客户端命令。
 func handleGuestCommand(server *chatServer, peer *clientConn, cmd protocol.Packet) bool {
 	switch cmd.Cmd {
 	case protocol.CmdRegister:
@@ -142,7 +142,7 @@ func handleGuestCommand(server *chatServer, peer *clientConn, cmd protocol.Packe
 	return false
 }
 
-// handleAuthedCommand 路由已登录用户的聊天命令。
+// handleAuthedCommand 处理已经登录的用户发来的聊天命令。
 func handleAuthedCommand(server *chatServer, peer *clientConn, cmd protocol.Packet) bool {
 	switch {
 	case cmd.Cmd == protocol.CmdPublic:
@@ -161,8 +161,8 @@ func handleAuthedCommand(server *chatServer, peer *clientConn, cmd protocol.Pack
 	return false
 }
 
-// handleRegister 校验并注册用户。
-// 注册成功只返回 OK，不会把当前连接切换为登录态。
+// handleRegister 检查用户名和密码是否合规，然后写入数据库。
+// 注册成功只告诉客户端 OK，不会顺便把这个连接变成已登录状态。
 func handleRegister(peer *clientConn, cmd protocol.Packet) {
 	if err := protocol.ValidateUsername(cmd.Username); err != nil {
 		_ = sendErr(peer, "INVALID_USERNAME")
@@ -184,7 +184,7 @@ func handleRegister(peer *clientConn, cmd protocol.Packet) {
 	}
 }
 
-// handleLogin 校验账号密码，并把登录成功的连接加入在线用户名表。
+// handleLogin 检查账号密码；成功后把这个连接标记为在线用户。
 func handleLogin(server *chatServer, peer *clientConn, cmd protocol.Packet) bool {
 	if err := protocol.ValidateUsername(cmd.Username); err != nil {
 		_ = sendErr(peer, "INVALID_USERNAME")
@@ -218,8 +218,8 @@ func handleLogin(server *chatServer, peer *clientConn, cmd protocol.Packet) bool
 	return true
 }
 
-// handlePublicMessage 保存公聊消息后广播给所有在线用户。
-// 广播前先取在线连接快照，避免持有全局锁时写网络。
+// handlePublicMessage 先保存公聊消息，再发给所有在线用户。
+// 发送前先复制一份当前在线连接列表，后面写网络时就不用一直占着锁。
 func handlePublicMessage(server *chatServer, peer *clientConn, cmd protocol.Packet) {
 	if err := protocol.ValidateMessage(cmd.Content); err != nil {
 		_ = sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, err.Error()))
@@ -237,8 +237,8 @@ func handlePublicMessage(server *chatServer, peer *clientConn, cmd protocol.Pack
 	}
 }
 
-// handlePrivateEnter 只判断目标用户是否可私聊。
-// 真正进入私聊模式由客户端收到 ENTEROK 后本地切换。
+// handlePrivateEnter 只检查对方能不能私聊，比如是否在线、是不是自己。
+// 客户端收到 ENTEROK 后，才会在本地切到私聊输入模式。
 func handlePrivateEnter(server *chatServer, peer *clientConn, cmd protocol.Packet) {
 	if err := protocol.ValidateUsername(cmd.Target); err != nil {
 		_ = sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateEnterErr, "INVALID_USERNAME"))
@@ -254,7 +254,7 @@ func handlePrivateEnter(server *chatServer, peer *clientConn, cmd protocol.Packe
 	_ = sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateEnterOK, cmd.Target))
 }
 
-// handlePrivateMessage 保存私聊消息，并发送给目标用户和发送者自己。
+// handlePrivateMessage 保存私聊消息，然后分别发给对方和自己。
 func handlePrivateMessage(server *chatServer, peer *clientConn, cmd protocol.Packet) {
 	if err := protocol.ValidateUsername(cmd.Target); err != nil {
 		_ = sendPacket(peer, protocol.MakePacket(protocol.CmdSystem, "私聊对象无效"))
@@ -287,22 +287,22 @@ func handlePrivateMessage(server *chatServer, peer *clientConn, cmd protocol.Pac
 	_ = sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateAck, targetPeer.username, cmd.Content))
 }
 
-// handleUserList 返回当前在线用户名列表。
-// 用户名排序在 snapshotOnlineUsernames 中完成，保证输出稳定。
+// handleUserList 把当前在线用户名发给客户端。
+// 用户名会先排序，这样每次看到的顺序更稳定。
 func handleUserList(server *chatServer, peer *clientConn) {
 	names := snapshotOnlineUsernames(server)
 	_ = sendPacket(peer, protocol.MakePacket(protocol.CmdList, strings.Join(names, ",")))
 }
 
-// addPeer 把新连接放入连接表。
-// 即使未登录连接也要登记，关服时才能统一通知和关闭。
+// addPeer 把新连接记下来。
+// 没登录的连接也要记录，关服时才能一起通知并关闭。
 func addPeer(server *chatServer, peer *clientConn) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	server.peersByConn[peer.conn] = peer
 }
 
-// disconnectPeer 从连接表和在线表中移除连接，并关闭底层 TCP 连接。
+// disconnectPeer 清理断开的客户端：从连接表、在线表里删掉，并关闭 TCP 连接。
 func disconnectPeer(server *chatServer, peer *clientConn) {
 	server.mu.Lock()
 	if peer.username != "" {
@@ -314,20 +314,20 @@ func disconnectPeer(server *chatServer, peer *clientConn) {
 	_ = peer.conn.Close()
 }
 
-// sendPacket 是服务端写客户端连接的唯一入口。
+// sendPacket 给某个客户端发送一条完整消息。
 func sendPacket(peer *clientConn, payload string) error {
 	peer.writeMu.Lock()
 	defer peer.writeMu.Unlock()
 	return pre.WritePacket(peer.conn, []byte(payload))
 }
 
-// sendErr 发送认证阶段的错误码响应。
+// sendErr 给客户端发送一条 ERR 消息，内容是具体错误码。
 func sendErr(peer *clientConn, code string) error {
 	return sendPacket(peer, protocol.MakePacket(protocol.CmdErr, code))
 }
 
-// snapshotOnlinePeers 返回在线连接快照。
-// 调用方可以在不持锁的情况下执行网络写入。
+// snapshotOnlinePeers 复制一份当前在线连接列表。
+// 这样调用方后面群发消息时，不需要一直锁住用户表。
 func snapshotOnlinePeers(server *chatServer) []*clientConn {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
@@ -339,7 +339,7 @@ func snapshotOnlinePeers(server *chatServer) []*clientConn {
 	return peers
 }
 
-// snapshotOnlineUsernames 返回排序后的在线用户名快照。
+// snapshotOnlineUsernames 复制当前在线用户名，并按字母顺序排好。
 func snapshotOnlineUsernames(server *chatServer) []string {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
@@ -352,7 +352,7 @@ func snapshotOnlineUsernames(server *chatServer) []string {
 	return names
 }
 
-// snapshotOnlineUserSet 返回在线用户名集合，供私聊进入校验使用。
+// snapshotOnlineUserSet 把在线用户名整理成集合，方便快速判断某个人是否在线。
 func snapshotOnlineUserSet(server *chatServer) map[string]struct{} {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
@@ -364,7 +364,7 @@ func snapshotOnlineUserSet(server *chatServer) map[string]struct{} {
 	return users
 }
 
-// watchConsoleExit 监听服务端控制台 /exit 命令。
+// watchConsoleExit 等待服务端控制台输入 /exit，用来手动关服。
 func watchConsoleExit(server *chatServer) {
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -382,7 +382,7 @@ func watchConsoleExit(server *chatServer) {
 	}
 }
 
-// shutdownServer 执行一次性关服流程：通知客户端、关闭连接、关闭 listener。
+// shutdownServer 只执行一次关服：通知所有客户端，然后关闭连接和监听端口。
 func shutdownServer(server *chatServer, message string) {
 	server.closeOnce.Do(func() {
 		close(server.shutdownCh)
@@ -398,7 +398,7 @@ func shutdownServer(server *chatServer, message string) {
 	})
 }
 
-// snapshotAllPeers 返回所有连接快照，包含尚未登录的连接。
+// snapshotAllPeers 复制一份所有客户端连接，包括还没登录的连接。
 func snapshotAllPeers(server *chatServer) []*clientConn {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
@@ -410,7 +410,7 @@ func snapshotAllPeers(server *chatServer) []*clientConn {
 	return peers
 }
 
-// isShuttingDown 非阻塞判断服务端是否已经进入关服流程。
+// isShuttingDown 看服务端是不是已经开始关服；这个检查不会卡住当前 goroutine。
 func isShuttingDown(server *chatServer) bool {
 	select {
 	case <-server.shutdownCh:
@@ -420,7 +420,7 @@ func isShuttingDown(server *chatServer) bool {
 	}
 }
 
-// mapLoginResultToCode 把数据库层登录结果映射为客户端协议错误码。
+// mapLoginResultToCode 把数据库返回的登录结果，转成客户端能看懂的错误码。
 func mapLoginResultToCode(result mysql.LoginResult) string {
 	switch result {
 	case mysql.LoginUserNotFound:
@@ -432,7 +432,7 @@ func mapLoginResultToCode(result mysql.LoginResult) string {
 	}
 }
 
-// canEnterPrivateMode 校验私聊目标，返回空字符串表示允许进入。
+// canEnterPrivateMode 检查能不能进入私聊；返回空字符串表示可以进入。
 func canEnterPrivateMode(sender, target string, online map[string]struct{}) string {
 	if sender == target {
 		return "TARGET_SELF"

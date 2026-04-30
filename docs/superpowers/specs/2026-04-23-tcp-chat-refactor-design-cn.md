@@ -85,6 +85,58 @@
 - 每个连接一个写锁，防止并发写同一个 TCP 连接
 - `shutdownCh` 和 `sync.Once` 控制关服流程只执行一次
 
+## 函数顺序清单
+
+下面只按源码从上到下列出函数，方便读代码时快速对照。
+
+### `client/client.go`
+
+1. `main()`：客户端入口，连接菜单和聊天流程。
+2. `serverAddr() string`：返回要连接的服务端地址。
+3. `runMainMenu(reader *bufio.Reader) (string, net.Conn, error)`：显示主菜单，让用户选择登录、注册或退出。
+4. `doAuthFlow(reader *bufio.Reader, action string) (string, net.Conn, error)`：执行一次登录或注册流程，并和服务端交换结果。
+5. `promptCredentials(reader *bufio.Reader) (string, string, error)`：读取用户输入的用户名和密码。
+6. `runChat(conn net.Conn, reader *bufio.Reader, session *clientSession)`：进入聊天界面，同时处理键盘输入和服务端消息。
+7. `handleChatInput(conn net.Conn, session *clientSession, line string) (bool, error)`：处理用户在聊天里输入的一行内容。
+8. `readChatInput(reader *bufio.Reader, inputCh chan<- string)`：持续读取键盘输入，并交给聊天主循环处理。
+9. `receiveLoop(conn net.Conn, privateEnterCh chan<- privateEnterResult, doneCh chan<- struct{})`：持续接收服务端消息，并把需要主循环处理的结果送出去。
+10. `sendPayload(conn net.Conn, payload string) error`：把一条协议消息发给服务端。
+11. `readLine(reader *bufio.Reader, prompt string) (string, error)`：打印提示语并读取一行输入。
+12. `printMainMenu()`：打印登录前的主菜单。
+13. `printChatGuide()`：打印聊天界面的可用命令提示。
+14. `translateAuthError(code string) string`：把登录、注册错误码转成用户能看懂的提示。
+15. `translatePrivateEnterError(code string) string`：把进入私聊失败的错误码转成提示。
+16. `renderServerPacket(packet protocol.Packet) (string, bool)`：把服务端消息转成要显示在终端上的文字。
+17. `applyPrivateEnterResult(session *clientSession, result privateEnterResult) string`：根据服务端确认结果，更新本地私聊状态。
+
+### `server/server.go`
+
+1. `main()`：服务端入口，准备数据库、监听端口并启动服务。
+2. `newChatServer(listener net.Listener) *chatServer`：创建服务端运行时需要的连接表、用户表和关服信号。
+3. `serve(server *chatServer) error`：不断接收新客户端，并为每个客户端启动单独的处理 goroutine。
+4. `handleConnection(server *chatServer, peer *clientConn)`：负责一个客户端连接的完整处理过程。
+5. `handleGuestCommand(server *chatServer, peer *clientConn, cmd protocol.Packet) bool`：处理还没登录的客户端命令。
+6. `handleAuthedCommand(server *chatServer, peer *clientConn, cmd protocol.Packet) bool`：处理已经登录用户的聊天命令。
+7. `handleRegister(peer *clientConn, cmd protocol.Packet)`：检查注册信息并写入数据库。
+8. `handleLogin(server *chatServer, peer *clientConn, cmd protocol.Packet) bool`：检查账号密码，成功后把用户标记为在线。
+9. `handlePublicMessage(server *chatServer, peer *clientConn, cmd protocol.Packet)`：保存公聊消息，并发给所有在线用户。
+10. `handlePrivateEnter(server *chatServer, peer *clientConn, cmd protocol.Packet)`：检查目标用户是否可以进入私聊。
+11. `handlePrivateMessage(server *chatServer, peer *clientConn, cmd protocol.Packet)`：保存私聊消息，并发给对方和自己。
+12. `handleUserList(server *chatServer, peer *clientConn)`：把当前在线用户名列表发给客户端。
+13. `addPeer(server *chatServer, peer *clientConn)`：把新连接记录到连接表里。
+14. `disconnectPeer(server *chatServer, peer *clientConn)`：清理断开的连接，并从在线表里移除用户。
+15. `sendPacket(peer *clientConn, payload string) error`：给某个客户端发送一条完整协议消息。
+16. `sendErr(peer *clientConn, code string) error`：给客户端发送一条 `ERR` 错误码消息。
+17. `snapshotOnlinePeers(server *chatServer) []*clientConn`：复制当前在线连接列表，方便后面群发消息。
+18. `snapshotOnlineUsernames(server *chatServer) []string`：复制并排序当前在线用户名。
+19. `snapshotOnlineUserSet(server *chatServer) map[string]struct{}`：整理在线用户名集合，方便快速判断某人是否在线。
+20. `watchConsoleExit(server *chatServer)`：监听服务端控制台输入的 `/exit`。
+21. `shutdownServer(server *chatServer, message string)`：通知所有客户端并关闭连接和监听端口。
+22. `snapshotAllPeers(server *chatServer) []*clientConn`：复制所有连接，包括还没登录的连接。
+23. `isShuttingDown(server *chatServer) bool`：判断服务端是否已经开始关服。
+24. `mapLoginResultToCode(result mysql.LoginResult) string`：把数据库登录结果转成客户端错误码。
+25. `canEnterPrivateMode(sender, target string, online map[string]struct{}) string`：检查私聊目标是否有效。
+
 ## 用户行为保持不变
 
 ### 登录前
