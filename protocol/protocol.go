@@ -6,107 +6,37 @@ import (
 	"strings"
 )
 
+// 协议使用竖线分隔字段，命令常量集中在这里避免客户端和服务端写散。
 const (
-	// CmdLogin 表示登录请求。
-	CmdLogin = "LOGIN"
-	// CmdRegister 表示注册请求。
-	CmdRegister = "REGISTER"
-	// CmdOK 表示认证成功响应。
-	CmdOK = "OK"
-	// CmdErr 表示认证失败响应。
-	CmdErr = "ERR"
-	// CmdPublic 表示公聊消息。
-	CmdPublic = "PUBLIC"
-	// CmdPrivateEnter 表示请求进入私聊。
-	CmdPrivateEnter = "PRIVATE_ENTER"
-	// CmdPrivateEnterOK 表示允许进入私聊。
-	CmdPrivateEnterOK = "PRIVATE_ENTER_OK"
-	// CmdPrivateEnterErr 表示拒绝进入私聊。
+	CmdLogin           = "LOGIN"
+	CmdRegister        = "REGISTER"
+	CmdOK              = "OK"
+	CmdErr             = "ERR"
+	CmdPublic          = "PUBLIC"
+	CmdPrivateEnter    = "PRIVATE_ENTER"
+	CmdPrivateEnterOK  = "PRIVATE_ENTER_OK"
 	CmdPrivateEnterErr = "PRIVATE_ENTER_ERR"
-	// CmdPrivate 表示私聊消息。
-	CmdPrivate = "PRIVATE"
-	// CmdPrivateAck 表示私聊发送方回执。
-	CmdPrivateAck = "PRIVATE_ACK"
-	// CmdList 表示在线用户列表请求或响应。
-	CmdList = "LIST"
-	// CmdQuit 表示客户端退出会话。
-	CmdQuit = "QUIT"
-	// CmdSystem 表示普通系统提示。
-	CmdSystem = "SYSTEM"
-	// CmdShutdown 表示服务端关闭通知。
-	CmdShutdown = "SHUTDOWN"
+	CmdPrivate         = "PRIVATE"
+	CmdPrivateAck      = "PRIVATE_ACK"
+	CmdList            = "LIST"
+	CmdQuit            = "QUIT"
+	CmdSystem          = "SYSTEM"
+	CmdShutdown        = "SHUTDOWN"
 )
 
-const (
-	// CodeNameExists 表示注册时用户名已经存在。
-	CodeNameExists = "NAME_EXISTS"
-	// CodeUserNotFound 表示登录时用户不存在。
-	CodeUserNotFound = "USER_NOT_FOUND"
-	// CodePasswordIncorrect 表示登录时密码错误。
-	CodePasswordIncorrect = "PASSWORD_INCORRECT"
-	// CodeAlreadyOnline 表示同一账号已经在线。
-	CodeAlreadyOnline = "ALREADY_ONLINE"
-	// CodeInvalidUsername 表示用户名不满足格式要求。
-	CodeInvalidUsername = "INVALID_USERNAME"
-	// CodeInvalidPassword 表示密码不满足格式要求。
-	CodeInvalidPassword = "INVALID_PASSWORD"
-	// CodeDBError 表示数据库操作失败。
-	CodeDBError = "DB_ERROR"
-	// CodeTargetNotFound 表示私聊目标不存在或不在线。
-	CodeTargetNotFound = "TARGET_NOT_FOUND"
-	// CodeTargetSelf 表示用户试图和自己私聊。
-	CodeTargetSelf = "TARGET_SELF"
-	// CodeInvalidCommand 表示报文格式不是协议支持的格式。
-	CodeInvalidCommand = "INVALID_COMMAND"
-)
-
-const (
-	// InputLeavePrivate 是客户端本地动作：退出私聊但不退出程序。
-	InputLeavePrivate = "LEAVE_PRIVATE"
-	// InputExitClient 是客户端本地动作：退出整个客户端。
-	InputExitClient = "EXIT_CLIENT"
-)
-
-// ChatMode 表示客户端当前所处的聊天模式。
-type ChatMode string
-
-const (
-	// ChatModePublic 表示普通输入默认发送到公聊。
-	ChatModePublic ChatMode = "PUBLIC"
-	// ChatModePrivate 表示普通输入默认发送给当前私聊目标。
-	ChatModePrivate ChatMode = "PRIVATE"
-)
-
-// Packet 是解析后的统一协议结构。
-// 现在只保留一个 Cmd 字段，不再拆成 Kind + Action 两层，协议判断更轻。
+// Packet 是客户端和服务端协议解析后的统一结构。
+// 不同命令只使用其中一部分字段，避免为每种包类型创建一组小结构。
 type Packet struct {
-	// Cmd 是命令名，例如 LOGIN、PUBLIC、PRIVATE。
-	Cmd string
-	// Username 保存登录/注册请求里的用户名。
+	Cmd      string
 	Username string
-	// Password 保存登录/注册请求里的密码。
 	Password string
-	// Target 保存私聊目标、消息发送者或回执目标。
-	Target string
-	// Content 保存聊天内容或在线列表内容。
-	Content string
-	// Code 保存错误码。
-	Code string
-	// Message 保存系统提示文本。
-	Message string
+	Target   string
+	Content  string
+	Code     string
+	Message  string
 }
 
-// InputCommand 是客户端输入解析后的统一结构。
-type InputCommand struct {
-	// Action 表示输入动作，可以直接复用 CmdPublic、CmdPrivate 等命令名。
-	Action string
-	// Target 表示私聊目标。
-	Target string
-	// Text 表示要发送的消息正文。
-	Text string
-}
-
-// ValidateUsername 校验用户名规则。
+// ValidateUsername 校验用户名是否能安全放入文本协议字段。
 func ValidateUsername(name string) error {
 	name = strings.TrimSpace(name)
 	if len(name) < 1 || len(name) > 10 {
@@ -118,7 +48,7 @@ func ValidateUsername(name string) error {
 	return nil
 }
 
-// ValidatePassword 校验密码规则。
+// ValidatePassword 校验密码是否能安全放入文本协议字段。
 func ValidatePassword(password string) error {
 	if len(password) < 6 || len(password) > 10 {
 		return errors.New("密码长度必须为6到10位")
@@ -129,7 +59,8 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
-// ValidateMessage 校验聊天消息。
+// ValidateMessage 校验聊天正文。
+// 正文可以包含竖线，所以解析消息包时必须使用 SplitN。
 func ValidateMessage(text string) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("消息不能为空")
@@ -137,7 +68,8 @@ func ValidateMessage(text string) error {
 	return nil
 }
 
-// ParseClientPacket 解析客户端发给服务端的轻量协议。
+// ParseClientPacket 解析客户端发给服务端的协议包。
+// 聊天正文允许包含竖线，因此 PUBLIC/PRIVATE 使用限制次数的拆分。
 func ParseClientPacket(raw string) (Packet, error) {
 	cmd := firstField(raw)
 
@@ -166,22 +98,18 @@ func ParseClientPacket(raw string) (Packet, error) {
 			return Packet{}, invalid(raw)
 		}
 		return Packet{Cmd: CmdPrivate, Target: parts[1], Content: parts[2]}, nil
-	case CmdList:
-		if raw != CmdList {
+	case CmdList, CmdQuit:
+		if raw != cmd {
 			return Packet{}, invalid(raw)
 		}
-		return Packet{Cmd: CmdList}, nil
-	case CmdQuit:
-		if raw != CmdQuit {
-			return Packet{}, invalid(raw)
-		}
-		return Packet{Cmd: CmdQuit}, nil
+		return Packet{Cmd: cmd}, nil
 	default:
 		return Packet{}, invalid(raw)
 	}
 }
 
-// ParseServerPacket 解析服务端发给客户端的轻量协议。
+// ParseServerPacket 解析服务端发给客户端的协议包。
+// 展示类消息和聊天正文同样允许包含竖线。
 func ParseServerPacket(raw string) (Packet, error) {
 	cmd := firstField(raw)
 
@@ -233,49 +161,7 @@ func ParseServerPacket(raw string) (Packet, error) {
 	}
 }
 
-// ParseChatInput 把用户在客户端输入的一行文本解析成动作。
-func ParseChatInput(mode ChatMode, input string) (InputCommand, error) {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return InputCommand{}, errors.New("输入不能为空")
-	}
-
-	switch input {
-	case "/list":
-		return InputCommand{Action: CmdList}, nil
-	case "/exit":
-		if mode == ChatModePrivate {
-			return InputCommand{Action: InputLeavePrivate}, nil
-		}
-		return InputCommand{Action: InputExitClient}, nil
-	}
-
-	if strings.HasPrefix(input, "/chat") {
-		if mode == ChatModePrivate {
-			return InputCommand{}, errors.New("私聊状态下不能再次进入私聊")
-		}
-		target := strings.TrimSpace(strings.TrimPrefix(input, "/chat"))
-		if err := ValidateUsername(target); err != nil {
-			return InputCommand{}, err
-		}
-		return InputCommand{Action: CmdPrivateEnter, Target: target}, nil
-	}
-
-	if strings.HasPrefix(input, "/") {
-		return InputCommand{}, errors.New("未知命令")
-	}
-	if err := ValidateMessage(input); err != nil {
-		return InputCommand{}, err
-	}
-	if mode == ChatModePrivate {
-		return InputCommand{Action: CmdPrivate, Text: input}, nil
-	}
-	return InputCommand{Action: CmdPublic, Text: input}, nil
-}
-
-// MakePacket 用来拼协议字符串。
-// 以前这里有很多 BuildXXX 函数，功能都只是 strings.Join。
-// 现在统一成一个简单函数，调用处直接写命令名和字段，更容易看。
+// MakePacket 用命令名和字段组装协议字符串。
 func MakePacket(cmd string, fields ...string) string {
 	parts := append([]string{cmd}, fields...)
 	return strings.Join(parts, "|")
@@ -297,5 +183,5 @@ func splitContent(raw string, parts int) (string, error) {
 }
 
 func invalid(raw string) error {
-	return fmt.Errorf("%s: %q", CodeInvalidCommand, raw)
+	return fmt.Errorf("INVALID_COMMAND: %q", raw)
 }
