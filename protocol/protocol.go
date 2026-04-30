@@ -6,18 +6,18 @@ import (
 	"strings"
 )
 
-// 协议使用竖线分隔字段，命令常量集中在这里避免客户端和服务端写散。
+// 协议使用竖线分隔字段，命令值尽量保持单一、短前缀。
 const (
 	CmdLogin           = "LOGIN"
 	CmdRegister        = "REGISTER"
 	CmdOK              = "OK"
 	CmdErr             = "ERR"
 	CmdPublic          = "PUBLIC"
-	CmdPrivateEnter    = "PRIVATE_ENTER"
-	CmdPrivateEnterOK  = "PRIVATE_ENTER_OK"
-	CmdPrivateEnterErr = "PRIVATE_ENTER_ERR"
+	CmdPrivateEnter    = "ENTER"
+	CmdPrivateEnterOK  = "ENTEROK"
+	CmdPrivateEnterErr = "ENTERERR"
 	CmdPrivate         = "PRIVATE"
-	CmdPrivateAck      = "PRIVATE_ACK"
+	CmdPrivateAck      = "ACK"
 	CmdList            = "LIST"
 	CmdQuit            = "QUIT"
 	CmdSystem          = "SYSTEM"

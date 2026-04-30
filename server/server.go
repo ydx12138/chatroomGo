@@ -238,7 +238,7 @@ func (s *chatServer) handlePublicMessage(peer *clientConn, cmd protocol.Packet) 
 }
 
 // handlePrivateEnter 只判断目标用户是否可私聊。
-// 真正进入私聊模式由客户端收到 PRIVATE_ENTER_OK 后本地切换。
+// 真正进入私聊模式由客户端收到 ENTEROK 后本地切换。
 func (s *chatServer) handlePrivateEnter(peer *clientConn, cmd protocol.Packet) {
 	if err := protocol.ValidateUsername(cmd.Target); err != nil {
 		_ = s.sendPacket(peer, protocol.MakePacket(protocol.CmdPrivateEnterErr, "INVALID_USERNAME"))
