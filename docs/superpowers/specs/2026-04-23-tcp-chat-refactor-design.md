@@ -69,7 +69,6 @@ The client keeps only local UI/session state:
 
 - current username
 - current private-chat target
-- whether it is waiting for a private-enter response
 
 The client no longer needs a separate `ChatMode` enum. `privateTarget == ""` means public mode, and a non-empty target means private mode.
 
@@ -83,7 +82,55 @@ The server keeps:
 - `peersByName` for logged-in users only
 - one global mutex for those maps
 - one write mutex per client connection
-- a shutdown channel and `sync.Once` for graceful stop
+- a shutdown channel for marking server shutdown
+
+## Struct Field Reference
+
+### `protocol.Packet`
+
+`Packet` is the shared parsed result for protocol messages. Not every message uses every field.
+
+- `Cmd`: The message command, such as `LOGIN`, `PUBLIC`, or `PRIVATE`.
+- `Username`: The username used by login and registration messages.
+- `Password`: The password used by login and registration messages.
+- `Target`: The message target. For chat messages it is the sender or receiver; for private-chat entry it is the target user.
+- `Content`: Chat text or regular content carried by a command.
+- `Code`: An error code, such as `NAME_EXISTS` or `TARGET_NOT_FOUND`.
+- `Message`: System text, such as shutdown notices or other server messages.
+
+### `client.clientSession`
+
+`clientSession` keeps only the local chat state the client needs.
+
+- `username`: The currently logged-in username.
+- `privateTarget`: The current private-chat target; empty means the client is in public chat.
+
+### `client.privateEnterResult`
+
+`privateEnterResult` passes private-chat entry results from the receiving goroutine back to the chat loop.
+
+- `ok`: Whether private-chat entry succeeded.
+- `target`: The target username when entry succeeds.
+- `code`: The error code when entry fails.
+
+### `server.clientConn`
+
+`clientConn` records one client connection from the server's point of view.
+
+- `conn`: The underlying TCP connection used for network reads and writes.
+- `username`: The username after this connection logs in; empty before login.
+- `writeMu`: A per-connection write lock so only one goroutine writes to this client at a time.
+
+### `server.chatServer`
+
+`chatServer` stores shared server runtime data.
+
+- `listener`: The TCP listener that accepts new client connections.
+- `peersByConn`: All client connections, including clients that have not logged in.
+- `peersByName`: Logged-in users, indexed by username.
+- `mu`: Protects `peersByConn` and `peersByName`.
+- `shutdownCh`: Shutdown signal; closed once the server starts shutting down.
+- `shutdownWg`: Waits for all connection-handling goroutines to exit.
 
 ## Function Order Reference
 
@@ -136,6 +183,144 @@ The lists below follow the source files from top to bottom.
 23. `isShuttingDown(server *chatServer) bool`: Checks whether server shutdown has already started.
 24. `mapLoginResultToCode(result mysql.LoginResult) string`: Converts the database login result into a client error code.
 25. `canEnterPrivateMode(sender, target string, online map[string]struct{}) string`: Checks whether a private-chat target is valid.
+
+## Main Flow Reference
+
+### Client Startup And Main Menu
+
+1. `main` creates the terminal reader.
+2. `main` calls `runMainMenu`.
+3. `runMainMenu` prints the main menu and lets the user choose login, registration, or exit.
+4. If the user exits, `runMainMenu` returns `errClientExit`, and `main` treats it as a normal exit.
+5. If login succeeds, `runMainMenu` returns the username and the still-open TCP connection.
+6. `main` creates `clientSession`, then calls `runChat`.
+
+### Registration Flow
+
+1. The user chooses registration in the main menu.
+2. `runMainMenu` calls `doAuthFlow(reader, protocol.CmdRegister)`.
+3. `doAuthFlow` calls `promptCredentials` to read username and password, and the client checks their format first.
+4. `doAuthFlow` connects to the server and uses `sendPayload` to send `REGISTER|<username>|<password>`.
+5. The server `serve` function accepts the connection and starts `handleConnection` in a goroutine.
+6. `handleConnection` reads the TCP packet and parses `REGISTER` with `protocol.ParseClientPacket`.
+7. Because the connection is not logged in yet, `handleConnection` passes the command to `handleGuestCommand`.
+8. `handleGuestCommand` calls `handleRegister`.
+9. `handleRegister` checks username and password again, then calls `mysql.RegisterUser`.
+10. On success, the server sends `OK|REGISTER`; duplicate names return `ERR|NAME_EXISTS`; database failures return `ERR|DB_ERROR`.
+11. The client `doAuthFlow` reads the result. Success prints a registration message and returns to the menu; failure uses `translateAuthError`.
+12. Registration does not log the user in automatically.
+
+### Login Flow
+
+1. The user chooses login in the main menu.
+2. `runMainMenu` calls `doAuthFlow(reader, protocol.CmdLogin)`.
+3. `doAuthFlow` reads username and password, connects to the server, and sends `LOGIN|<username>|<password>`.
+4. Server `handleConnection` reads and parses `LOGIN`.
+5. Commands from not-yet-logged-in connections go to `handleGuestCommand`.
+6. `handleGuestCommand` calls `handleLogin`.
+7. `handleLogin` checks username and password format, then calls `mysql.CheckLogin`.
+8. User-not-found, wrong-password, and database failures are converted into error codes and sent with `sendErr`.
+9. Before completing login, `handleLogin` checks `peersByName` so the same username cannot be online twice.
+10. On success, the server sets `peer.username` and stores the connection in `peersByName`.
+11. The server returns `OK|LOGIN`.
+12. The client prints the chat command guide and passes the connection to `runChat`.
+
+### Chat Loop
+
+1. `runChat` creates three channels: input, private-entry result, and done.
+2. `runChat` starts `readChatInput` in a goroutine to read keyboard input.
+3. `runChat` starts `receiveLoop` in a goroutine to read server messages.
+4. `runChat` keeps the main loop responsible for user input, private-entry results, and connection close events.
+5. User input is handled by `handleChatInput`.
+6. Server `ENTEROK` and `ENTERERR` packets are forwarded by `receiveLoop` to `runChat`.
+7. `runChat` calls `applyPrivateEnterResult` to update local private-chat state.
+8. Normal server packets are rendered by `receiveLoop` through `renderServerPacket`.
+
+### Public Message Flow
+
+1. In public chat, the user types regular text.
+2. `handleChatInput` sees `privateTarget == ""` and builds `PUBLIC|<content>`.
+3. The client sends it with `sendPayload`.
+4. Server `handleConnection` reads and parses `PUBLIC`.
+5. Logged-in user commands go to `handleAuthedCommand`.
+6. `handleAuthedCommand` calls `handlePublicMessage`.
+7. `handlePublicMessage` checks that the message is not empty, then calls `mysql.SavePublicMessage`.
+8. On success, the server calls `snapshotOnlinePeers` to copy the current online connections.
+9. The server sends `PUBLIC|<sender>|<content>` to every online user.
+10. Client `receiveLoop` receives `PUBLIC`, and `renderServerPacket` prints it as a public chat message.
+
+### Private Chat Entry Flow
+
+1. In public chat, the user types `/chat <username>`.
+2. `handleChatInput` checks that the client is not already in private mode and validates the target username.
+3. The client sends `ENTER|<target>`.
+4. Server `handleConnection` parses `ENTER`.
+5. `handleAuthedCommand` calls `handlePrivateEnter`.
+6. `handlePrivateEnter` validates the target username.
+7. `handlePrivateEnter` copies online usernames with `snapshotOnlineUserSet`.
+8. `canEnterPrivateMode` checks whether the target is the sender or is offline.
+9. If entry is allowed, the server sends `ENTEROK|<target>`.
+10. If entry fails, the server sends `ENTERERR|<code>`.
+11. Client `receiveLoop` forwards `ENTEROK` or `ENTERERR` to `runChat`.
+12. `runChat` calls `applyPrivateEnterResult`. Success sets `privateTarget`; failure clears it and prints an error.
+
+### Private Message Flow
+
+1. After private chat entry, `privateTarget` stores the current private-chat target.
+2. The user types regular text.
+3. `handleChatInput` sees `privateTarget != ""` and sends `PRIVATE|<target>|<content>`.
+4. Server `handleConnection` parses `PRIVATE`.
+5. `handleAuthedCommand` calls `handlePrivateMessage`.
+6. `handlePrivateMessage` validates the target username and message content.
+7. The server looks up the target connection in `peersByName`.
+8. If the target is offline, the server sends a system message back to the sender.
+9. If the target is the sender, the server sends a system message back to the sender.
+10. If checks pass, the server calls `mysql.SavePrivateMessage`.
+11. On success, the server sends `PRIVATE|<sender>|<content>` to the target user.
+12. The server sends `ACK|<target>|<content>` to the sender so the sender sees their own private message.
+13. Client `receiveLoop` renders `PRIVATE` and `ACK` through `renderServerPacket`.
+
+### Online User List Flow
+
+1. The user types `/list`.
+2. `handleChatInput` sends `LIST`.
+3. Server `handleAuthedCommand` calls `handleUserList`.
+4. `handleUserList` calls `snapshotOnlineUsernames` to copy and sort online usernames.
+5. The server returns `LIST|<comma-separated-users>`.
+6. Client `renderServerPacket` prints the online user list.
+
+### Leaving Private Chat And Exiting The Client
+
+1. In private mode, the user types `/exit`.
+2. `handleChatInput` clears local `privateTarget` and does not notify the server.
+3. The user returns to public chat.
+4. In public mode, the user types `/exit`.
+5. `handleChatInput` sends `QUIT` to the server and tells `runChat` to exit.
+6. Server `handleAuthedCommand` returns `true` for `QUIT`.
+7. `handleConnection` exits, and its deferred `disconnectPeer` cleans up the connection and online map.
+
+### Common Server Message Handling
+
+1. Each client connection is handled by one `handleConnection` goroutine.
+2. `handleConnection` reads complete TCP frames through `pre.ReadPacket`.
+3. If reading fails and the server is not shutting down, it prints the disconnect error.
+4. If reading succeeds, `handleConnection` parses the command with `protocol.ParseClientPacket`.
+5. If parsing fails, the server sends `SYSTEM|无效命令`.
+6. If `peer.username == ""`, the command goes to `handleGuestCommand`.
+7. If `peer.username != ""`, the command goes to `handleAuthedCommand`.
+8. When connection handling ends, `disconnectPeer` removes the connection from `peersByConn` and `peersByName`.
+
+### Server Shutdown Flow
+
+1. The server console receives `/exit`.
+2. `watchConsoleExit` calls `shutdownServer`.
+3. `shutdownServer` closes `shutdownCh`, marking the server as shutting down.
+4. `shutdownServer` calls `snapshotAllPeers` to copy all connections, including not-yet-logged-in clients.
+5. The server sends `SHUTDOWN|<message>` to every connection.
+6. The server closes every client connection.
+7. The server closes the listener, so `Accept` in `serve` returns an error.
+8. `serve` sees `isShuttingDown(server) == true` and returns normally.
+9. `main` waits on `shutdownWg` so connection goroutines can exit.
 
 ## Preserved User Behavior
 

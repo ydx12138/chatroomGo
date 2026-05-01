@@ -36,7 +36,7 @@ type Packet struct {
 	Message  string
 }
 
-// ValidateUsername 校验用户名是否能安全放入文本协议字段。
+// ValidateUsername 校验用户名格式:长1-10、无空格、无|。
 func ValidateUsername(name string) error {
 	name = strings.TrimSpace(name)
 	if len(name) < 1 || len(name) > 10 {
@@ -69,15 +69,16 @@ func ValidateMessage(text string) error {
 }
 
 // ParseClientPacket 解析客户端发给服务端的协议包。
-// 聊天正文允许包含竖线，因此 PUBLIC/PRIVATE 使用限制次数的拆分。
+// 聊天正文允许包含竖线，因此 PUBLIC/PRIVATE 使用限制次数的拆分splitN。
 func ParseClientPacket(raw string) (Packet, error) {
+	//取得消息类型cmd
 	cmd := firstField(raw)
 
 	switch cmd {
 	case CmdLogin, CmdRegister:
 		parts := strings.Split(raw, "|")
 		if len(parts) != 3 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: cmd, Username: parts[1], Password: parts[2]}, nil
 	case CmdPublic:
@@ -89,22 +90,22 @@ func ParseClientPacket(raw string) (Packet, error) {
 	case CmdPrivateEnter:
 		parts := strings.Split(raw, "|")
 		if len(parts) != 2 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: CmdPrivateEnter, Target: parts[1]}, nil
 	case CmdPrivate:
 		parts := strings.SplitN(raw, "|", 3)
 		if len(parts) != 3 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: CmdPrivate, Target: parts[1], Content: parts[2]}, nil
 	case CmdList, CmdQuit:
 		if raw != cmd {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: cmd}, nil
 	default:
-		return Packet{}, invalid(raw)
+		return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 	}
 }
 
@@ -117,13 +118,13 @@ func ParseServerPacket(raw string) (Packet, error) {
 	case CmdOK:
 		parts := strings.Split(raw, "|")
 		if len(parts) != 2 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: CmdOK, Content: parts[1]}, nil
 	case CmdErr:
 		parts := strings.Split(raw, "|")
 		if len(parts) != 2 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: CmdErr, Code: parts[1]}, nil
 	case CmdSystem, CmdShutdown:
@@ -135,19 +136,19 @@ func ParseServerPacket(raw string) (Packet, error) {
 	case CmdPublic, CmdPrivate, CmdPrivateAck:
 		parts := strings.SplitN(raw, "|", 3)
 		if len(parts) != 3 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: cmd, Target: parts[1], Content: parts[2]}, nil
 	case CmdPrivateEnterOK:
 		parts := strings.Split(raw, "|")
 		if len(parts) != 2 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: CmdPrivateEnterOK, Target: parts[1]}, nil
 	case CmdPrivateEnterErr:
 		parts := strings.Split(raw, "|")
 		if len(parts) != 2 {
-			return Packet{}, invalid(raw)
+			return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 		}
 		return Packet{Cmd: CmdPrivateEnterErr, Code: parts[1]}, nil
 	case CmdList:
@@ -157,18 +158,24 @@ func ParseServerPacket(raw string) (Packet, error) {
 		}
 		return Packet{Cmd: CmdList, Content: content}, nil
 	default:
-		return Packet{}, invalid(raw)
+		return Packet{}, fmt.Errorf("INVALID_COMMAND: %q", raw)
 	}
 }
 
-// MakePacket 用命令名和字段组装协议字符串。
+// MakePacket 包装消息
+// 用命令名cmd和字段组装协议字符串。
+// 所有字段放在parts切片里，最后以|为分隔符拼为字符串
+// cmd是消息类型
+// fields消息体
 func MakePacket(cmd string, fields ...string) string {
 	parts := append([]string{cmd}, fields...)
 	return strings.Join(parts, "|")
 }
 
+// 返回第一个|之前的词,如果无|，则返回raw
 func firstField(raw string) string {
-	if i := strings.Index(raw, "|"); i >= 0 {
+	i := strings.Index(raw, "|")
+	if i >= 0 {
 		return raw[:i]
 	}
 	return raw
@@ -177,11 +184,7 @@ func firstField(raw string) string {
 func splitContent(raw string, parts int) (string, error) {
 	fields := strings.SplitN(raw, "|", parts)
 	if len(fields) != parts {
-		return "", invalid(raw)
+		return "", fmt.Errorf("INVALID_COMMAND: %q", raw)
 	}
 	return fields[len(fields)-1], nil
-}
-
-func invalid(raw string) error {
-	return fmt.Errorf("INVALID_COMMAND: %q", raw)
 }

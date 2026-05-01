@@ -69,7 +69,6 @@
 
 - 当前用户名
 - 当前私聊对象
-- 是否正在等待服务端确认进入私聊
 
 简化后不再需要单独的 `ChatMode` 枚举。`privateTarget == ""` 表示公聊；`privateTarget != ""` 表示私聊。
 
@@ -83,7 +82,55 @@
 - `peersByName`：已登录用户
 - 一个全局锁保护连接表和在线表
 - 每个连接一个写锁，防止并发写同一个 TCP 连接
-- `shutdownCh` 和 `sync.Once` 控制关服流程只执行一次
+- `shutdownCh` 表示服务端已经开始关服
+
+## 结构体字段说明
+
+### `protocol.Packet`
+
+`Packet` 是协议解析后的统一结果。不是每种消息都会用到所有字段。
+
+- `Cmd`：消息命令，比如 `LOGIN`、`PUBLIC`、`PRIVATE`。
+- `Username`：登录或注册时的用户名。
+- `Password`：登录或注册时的密码。
+- `Target`：消息目标。公聊和私聊里表示发送者或接收者，进入私聊时表示目标用户。
+- `Content`：聊天正文，或部分命令里携带的普通内容。
+- `Code`：错误码，比如 `NAME_EXISTS`、`TARGET_NOT_FOUND`。
+- `Message`：系统提示文字，比如关服通知或普通系统消息。
+
+### `client.clientSession`
+
+`clientSession` 只保存客户端自己需要记住的聊天状态。
+
+- `username`：当前登录成功的用户名。
+- `privateTarget`：当前正在私聊的目标用户；为空表示现在是公聊。
+
+### `client.privateEnterResult`
+
+`privateEnterResult` 用来把接收消息 goroutine 里的私聊进入结果交回聊天主循环。
+
+- `ok`：是否成功进入私聊。
+- `target`：成功进入私聊时的目标用户名。
+- `code`：进入私聊失败时的错误码。
+
+### `server.clientConn`
+
+`clientConn` 记录服务端眼里的一个客户端连接。
+
+- `conn`：底层 TCP 连接，用来读写网络消息。
+- `username`：这个连接登录成功后的用户名；没登录时为空。
+- `writeMu`：这个连接自己的写锁，保证同一时刻只有一个 goroutine 往它写消息。
+
+### `server.chatServer`
+
+`chatServer` 保存服务端运行时共享的数据。
+
+- `listener`：服务端监听端口的对象，用来接收新客户端连接。
+- `peersByConn`：所有客户端连接，包括还没登录的连接。
+- `peersByName`：已经登录成功的用户，按用户名查连接。
+- `mu`：保护 `peersByConn` 和 `peersByName` 的锁。
+- `shutdownCh`：关服信号，关闭后表示服务端已经开始关服。
+- `shutdownWg`：等待所有连接处理 goroutine 退出。
 
 ## 函数顺序清单
 
@@ -136,6 +183,144 @@
 23. `isShuttingDown(server *chatServer) bool`：判断服务端是否已经开始关服。
 24. `mapLoginResultToCode(result mysql.LoginResult) string`：把数据库登录结果转成客户端错误码。
 25. `canEnterPrivateMode(sender, target string, online map[string]struct{}) string`：检查私聊目标是否有效。
+
+## 主要流程说明
+
+### 客户端启动和主菜单
+
+1. `main` 创建终端输入 reader。
+2. `main` 调用 `runMainMenu`。
+3. `runMainMenu` 打印主菜单，让用户选择登录、注册或退出。
+4. 用户选择退出时，`runMainMenu` 返回 `errClientExit`，`main` 认为这是正常退出。
+5. 用户登录成功时，`runMainMenu` 返回用户名和保持打开的 TCP 连接。
+6. `main` 创建 `clientSession`，然后调用 `runChat` 进入聊天。
+
+### 注册流程
+
+1. 用户在主菜单选择注册。
+2. `runMainMenu` 调用 `doAuthFlow(reader, protocol.CmdRegister)`。
+3. `doAuthFlow` 调用 `promptCredentials` 读取用户名和密码，并先在客户端做一次格式检查。
+4. `doAuthFlow` 连接服务端，并通过 `sendPayload` 发送 `REGISTER|<用户名>|<密码>`。
+5. 服务端的 `serve` 接收连接后，开 goroutine 调用 `handleConnection`。
+6. `handleConnection` 读取 TCP 包，用 `protocol.ParseClientPacket` 解析出 `REGISTER`。
+7. 因为连接还没登录，`handleConnection` 把命令交给 `handleGuestCommand`。
+8. `handleGuestCommand` 调用 `handleRegister`。
+9. `handleRegister` 再次检查用户名和密码，然后调用 `mysql.RegisterUser` 写入数据库。
+10. 注册成功时，服务端返回 `OK|REGISTER`；用户名重复时返回 `ERR|NAME_EXISTS`；数据库错误时返回 `ERR|DB_ERROR`。
+11. 客户端 `doAuthFlow` 收到结果后，成功则提示注册成功并回到主菜单；失败则用 `translateAuthError` 转成提示文字。
+12. 注册成功不会自动登录，用户需要回到主菜单再选择登录。
+
+### 登录流程
+
+1. 用户在主菜单选择登录。
+2. `runMainMenu` 调用 `doAuthFlow(reader, protocol.CmdLogin)`。
+3. `doAuthFlow` 读取用户名和密码，连接服务端，发送 `LOGIN|<用户名>|<密码>`。
+4. 服务端 `handleConnection` 读取并解析出 `LOGIN`。
+5. 未登录连接的命令会交给 `handleGuestCommand`。
+6. `handleGuestCommand` 调用 `handleLogin`。
+7. `handleLogin` 检查用户名和密码格式，然后调用 `mysql.CheckLogin`。
+8. 数据库返回用户不存在、密码错误或数据库错误时，`handleLogin` 用 `sendErr` 返回对应错误码。
+9. 登录成功前，`handleLogin` 会检查 `peersByName`，防止同一个用户名重复在线。
+10. 登录成功后，服务端把 `peer.username` 设置为用户名，并把连接放进 `peersByName`。
+11. 服务端返回 `OK|LOGIN`。
+12. 客户端收到 `OK|LOGIN` 后，打印聊天命令说明，并把连接交给 `runChat` 继续使用。
+
+### 聊天主循环
+
+1. `runChat` 创建三个 channel：输入 channel、私聊进入结果 channel、连接结束 channel。
+2. `runChat` 启动 `readChatInput` goroutine，专门读取键盘输入。
+3. `runChat` 启动 `receiveLoop` goroutine，专门接收服务端消息。
+4. `runChat` 自己留在主循环里，统一处理用户输入、私聊进入结果和连接关闭。
+5. 用户输入会交给 `handleChatInput`。
+6. 服务端返回 `ENTEROK` 或 `ENTERERR` 时，`receiveLoop` 会把结果交给 `runChat`。
+7. `runChat` 调用 `applyPrivateEnterResult` 更新本地私聊对象。
+8. 普通服务端消息由 `receiveLoop` 调用 `renderServerPacket` 转成终端显示文字。
+
+### 公聊消息流程
+
+1. 用户在公聊状态下直接输入普通文字。
+2. `handleChatInput` 发现 `privateTarget == ""`，把文字组装成 `PUBLIC|<内容>`。
+3. 客户端通过 `sendPayload` 发给服务端。
+4. 服务端 `handleConnection` 读取消息并解析成 `PUBLIC`。
+5. 已登录用户的命令会交给 `handleAuthedCommand`。
+6. `handleAuthedCommand` 调用 `handlePublicMessage`。
+7. `handlePublicMessage` 检查消息不能为空，然后调用 `mysql.SavePublicMessage` 保存公聊消息。
+8. 保存成功后，服务端用 `snapshotOnlinePeers` 复制当前在线连接列表。
+9. 服务端给每个在线用户发送 `PUBLIC|<发送者>|<内容>`。
+10. 客户端 `receiveLoop` 收到 `PUBLIC` 后，`renderServerPacket` 把它显示成公聊消息。
+
+### 进入私聊流程
+
+1. 用户在公聊状态下输入 `/chat <用户名>`。
+2. `handleChatInput` 检查当前不在私聊状态，并检查目标用户名格式。
+3. 客户端发送 `ENTER|<目标用户名>`。
+4. 服务端 `handleConnection` 解析出 `ENTER`。
+5. `handleAuthedCommand` 调用 `handlePrivateEnter`。
+6. `handlePrivateEnter` 检查目标用户名格式。
+7. `handlePrivateEnter` 用 `snapshotOnlineUserSet` 复制在线用户名集合。
+8. `canEnterPrivateMode` 检查目标是不是自己、目标是否在线。
+9. 可以进入时，服务端返回 `ENTEROK|<目标用户名>`。
+10. 不能进入时，服务端返回 `ENTERERR|<错误码>`。
+11. 客户端 `receiveLoop` 收到 `ENTEROK` 或 `ENTERERR` 后，把结果发给 `runChat`。
+12. `runChat` 调用 `applyPrivateEnterResult`。成功时设置 `privateTarget`，失败时清空 `privateTarget` 并显示错误提示。
+
+### 私聊消息流程
+
+1. 客户端进入私聊后，`privateTarget` 保存当前私聊对象。
+2. 用户直接输入普通文字。
+3. `handleChatInput` 发现 `privateTarget != ""`，发送 `PRIVATE|<目标用户名>|<内容>`。
+4. 服务端 `handleConnection` 解析出 `PRIVATE`。
+5. `handleAuthedCommand` 调用 `handlePrivateMessage`。
+6. `handlePrivateMessage` 检查目标用户名和消息正文。
+7. 服务端从 `peersByName` 查找目标用户连接。
+8. 目标不在线时，服务端给发送者返回系统提示。
+9. 目标是自己时，服务端给发送者返回系统提示。
+10. 检查通过后，服务端调用 `mysql.SavePrivateMessage` 保存私聊消息。
+11. 保存成功后，服务端给目标用户发送 `PRIVATE|<发送者>|<内容>`。
+12. 服务端给发送者发送 `ACK|<目标用户名>|<内容>`，让发送者也看到自己发出的私聊内容。
+13. 客户端 `receiveLoop` 收到 `PRIVATE` 或 `ACK` 后，通过 `renderServerPacket` 显示出来。
+
+### 查看在线用户流程
+
+1. 用户输入 `/list`。
+2. `handleChatInput` 发送 `LIST`。
+3. 服务端 `handleAuthedCommand` 调用 `handleUserList`。
+4. `handleUserList` 调用 `snapshotOnlineUsernames` 复制并排序在线用户名。
+5. 服务端返回 `LIST|<逗号分隔的用户名>`。
+6. 客户端 `renderServerPacket` 把它显示成在线用户列表。
+
+### 退出私聊和退出客户端
+
+1. 用户在私聊状态输入 `/exit`。
+2. `handleChatInput` 只清空本地 `privateTarget`，不通知服务端。
+3. 用户回到公聊状态。
+4. 用户在公聊状态输入 `/exit`。
+5. `handleChatInput` 发送 `QUIT` 给服务端，并告诉 `runChat` 退出。
+6. 服务端 `handleAuthedCommand` 收到 `QUIT` 后返回 `true`。
+7. `handleConnection` 退出，defer 调用 `disconnectPeer` 清理连接和在线表。
+
+### 服务端收到消息后的通用处理
+
+1. 每个客户端连接都会由一个 `handleConnection` goroutine 处理。
+2. `handleConnection` 用 `pre.ReadPacket` 读取完整 TCP 包。
+3. 读取失败时，如果不是关服造成的正常断开，就打印连接断开信息。
+4. 读取成功后，`handleConnection` 用 `protocol.ParseClientPacket` 解析命令。
+5. 解析失败时，服务端返回 `SYSTEM|无效命令`。
+6. 如果 `peer.username == ""`，说明还没登录，只能走 `handleGuestCommand`。
+7. 如果 `peer.username != ""`，说明已经登录，走 `handleAuthedCommand`。
+8. 连接处理结束时，`disconnectPeer` 会从 `peersByConn` 和 `peersByName` 里清理该连接。
+
+### 服务端关服流程
+
+1. 服务端控制台输入 `/exit`。
+2. `watchConsoleExit` 调用 `shutdownServer`。
+3. `shutdownServer` 关闭 `shutdownCh`，表示服务端开始关服。
+4. `shutdownServer` 用 `snapshotAllPeers` 复制所有连接，包括未登录连接。
+5. 服务端给每个连接发送 `SHUTDOWN|<提示消息>`。
+6. 服务端关闭每个客户端连接。
+7. 服务端关闭 listener，`serve` 里的 `Accept` 会返回错误。
+8. `serve` 发现 `isShuttingDown(server)` 为 true，于是正常返回。
+9. `main` 等待 `shutdownWg`，让连接处理 goroutine 自然退出。
 
 ## 用户行为保持不变
 

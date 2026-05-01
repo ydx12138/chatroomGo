@@ -31,7 +31,6 @@ type chatServer struct {
 	mu          sync.RWMutex
 	shutdownCh  chan struct{}
 	shutdownWg  sync.WaitGroup
-	closeOnce   sync.Once
 }
 
 // main 先准备数据库和端口监听，然后开始接收客户端连接。
@@ -382,20 +381,18 @@ func watchConsoleExit(server *chatServer) {
 	}
 }
 
-// shutdownServer 只执行一次关服：通知所有客户端，然后关闭连接和监听端口。
+// shutdownServer 通知所有客户端，然后关闭连接和监听端口。
 func shutdownServer(server *chatServer, message string) {
-	server.closeOnce.Do(func() {
-		close(server.shutdownCh)
+	close(server.shutdownCh)
 
-		for _, peer := range snapshotAllPeers(server) {
-			_ = sendPacket(peer, protocol.MakePacket(protocol.CmdShutdown, message))
-			_ = peer.conn.Close()
-		}
+	for _, peer := range snapshotAllPeers(server) {
+		_ = sendPacket(peer, protocol.MakePacket(protocol.CmdShutdown, message))
+		_ = peer.conn.Close()
+	}
 
-		if err := server.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			fmt.Println("关闭监听器失败:", err)
-		}
-	})
+	if err := server.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		fmt.Println("关闭监听器失败:", err)
+	}
 }
 
 // snapshotAllPeers 复制一份所有客户端连接，包括还没登录的连接。

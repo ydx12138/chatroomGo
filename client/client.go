@@ -11,6 +11,7 @@ import (
 	"strings"
 )
 
+// 服务器ip
 const defaultServerAddr = "localhost:8888"
 
 // errClientExit 表示用户在主菜单主动退出，不属于异常。
@@ -19,9 +20,8 @@ var errClientExit = errors.New("client exit")
 // clientSession 只保存客户端本地聊天状态。
 // 服务端仍然是登录态、在线列表和消息落库的权威来源。
 type clientSession struct {
-	username       string
-	privateTarget  string
-	waitingPrivate bool
+	username      string
+	privateTarget string
 }
 
 // privateEnterResult 把接收协程里的私聊进入响应交回主循环处理。
@@ -50,9 +50,9 @@ var privateEnterErrors = map[string]string{
 
 // main 先处理登录/注册菜单，登录成功后进入聊天循环。
 func main() {
-
 	reader := bufio.NewReader(os.Stdin)
 	username, conn, err := runMainMenu(reader)
+	//返回的err里是否包含errClientExit，如果是，则是正常退出，否则打印err
 	if err != nil {
 		if !errors.Is(err, errClientExit) {
 			fmt.Println("[系统] 客户端异常退出:", err)
@@ -69,21 +69,17 @@ func main() {
 	runChat(conn, reader, session)
 }
 
-// serverAddr 返回客户端默认连接的服务端地址。
-func serverAddr() string {
-	return defaultServerAddr
-}
-
 // runMainMenu 循环处理登录前菜单。
 // 登录成功时返回仍然保持打开的 TCP 连接，注册成功则回到菜单不自动登录。
 func runMainMenu(reader *bufio.Reader) (string, net.Conn, error) {
 	for {
 		printMainMenu()
+		// readLined打印提示词，获取1、2、3选项
 		choice, err := readLine(reader, "请选择功能: ")
 		if err != nil {
 			return "", nil, err
 		}
-
+		//1、2、3对应登录、注册、退出
 		switch strings.TrimSpace(choice) {
 		case "1":
 			username, conn, err := doAuthFlow(reader, protocol.CmdLogin)
@@ -119,21 +115,23 @@ func doAuthFlow(reader *bufio.Reader, action string) (string, net.Conn, error) {
 		return "", nil, err
 	}
 
-	conn, err := net.Dial("tcp", serverAddr())
+	conn, err := net.Dial("tcp", defaultServerAddr)
 	if err != nil {
+		// fmt.Errorf将err包装一下返回
 		return "", nil, fmt.Errorf("连接服务端失败: %w", err)
 	}
-
-	if err := sendPayload(conn, protocol.MakePacket(action, username, password)); err != nil {
+	// 将username和password以及action包装，发送action请求
+	if err := pre.WritePacket(conn, []byte(protocol.MakePacket(action, username, password))); err != nil {
 		_ = conn.Close()
 		return "", nil, fmt.Errorf("发送认证请求失败: %w", err)
 	}
-
+	//读取服务器的响应
 	raw, err := pre.ReadPacket(conn)
 	if err != nil {
 		_ = conn.Close()
 		return "", nil, fmt.Errorf("读取认证响应失败: %w", err)
 	}
+	//解析响应
 	packet, err := protocol.ParseServerPacket(raw)
 	if err != nil {
 		_ = conn.Close()
@@ -164,7 +162,8 @@ func doAuthFlow(reader *bufio.Reader, action string) (string, net.Conn, error) {
 	}
 }
 
-// promptCredentials 先做客户端本地格式校验，让用户更快看到输入错误。
+// promptCredentials 读取username和password，
+// ValidateUsername和ValidatePassword做姓名和密码格式校验。
 // 服务端仍会再次校验，不能依赖客户端校验保证安全。
 func promptCredentials(reader *bufio.Reader) (string, string, error) {
 	username, err := readLine(reader, "请输入用户名: ")
@@ -222,10 +221,6 @@ func runChat(conn net.Conn, reader *bufio.Reader, session *clientSession) {
 // handleChatInput 把一行用户输入转成协议包或本地状态变化。
 // privateTarget 为空表示公聊；非空表示普通文本会发给当前私聊对象。
 func handleChatInput(conn net.Conn, session *clientSession, line string) (bool, error) {
-	if session.waitingPrivate {
-		return false, errors.New("正在等待私聊确认，请稍候")
-	}
-
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return false, errors.New("输入不能为空")
@@ -237,7 +232,6 @@ func handleChatInput(conn net.Conn, session *clientSession, line string) (bool, 
 		return false, sendPayload(conn, protocol.CmdList)
 	case line == "/exit" && inPrivate:
 		session.privateTarget = ""
-		session.waitingPrivate = false
 		fmt.Println("[系统] 已退出私聊，回到公聊")
 		return false, nil
 	case line == "/exit":
@@ -251,7 +245,6 @@ func handleChatInput(conn net.Conn, session *clientSession, line string) (bool, 
 		if err := protocol.ValidateUsername(target); err != nil {
 			return false, err
 		}
-		session.waitingPrivate = true
 		return false, sendPayload(conn, protocol.MakePacket(protocol.CmdPrivateEnter, target))
 	case strings.HasPrefix(line, "/"):
 		return false, errors.New("未知命令")
@@ -319,7 +312,7 @@ func sendPayload(conn net.Conn, payload string) error {
 	return pre.WritePacket(conn, []byte(payload))
 }
 
-// readLine 读取一行终端输入，并统一去掉 Windows/Linux 换行符。
+// readLine 打印prompt提示词，读取一行终端输入，统一去掉换行符并返回
 func readLine(reader *bufio.Reader, prompt string) (string, error) {
 	if prompt != "" {
 		fmt.Print(prompt)
@@ -329,24 +322,6 @@ func readLine(reader *bufio.Reader, prompt string) (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(line, "\r\n"), nil
-}
-
-// printMainMenu 打印登录前菜单。
-func printMainMenu() {
-	fmt.Println("========== Go 聊天室 ==========")
-	fmt.Println("1. 登录")
-	fmt.Println("2. 注册")
-	fmt.Println("3. 退出")
-	fmt.Println("================================")
-}
-
-// printChatGuide 打印登录后的聊天命令说明。
-func printChatGuide() {
-	fmt.Println("[系统] 公聊命令:")
-	fmt.Println("[系统] 直接输入内容发送公聊消息")
-	fmt.Println("[系统] /chat 用户名 进入私聊")
-	fmt.Println("[系统] /list 查看在线用户")
-	fmt.Println("[系统] /exit 退出客户端")
 }
 
 // translateAuthError 把认证错误码转换成用户可读提示。
@@ -393,7 +368,6 @@ func renderServerPacket(packet protocol.Packet) (string, bool) {
 // applyPrivateEnterResult 是唯一真正改变私聊目标的地方。
 // 失败时清空 privateTarget，防止继续向旧目标发送私聊消息。
 func applyPrivateEnterResult(session *clientSession, result privateEnterResult) string {
-	session.waitingPrivate = false
 	if result.ok {
 		session.privateTarget = result.target
 		return fmt.Sprintf("已进入与 %s 的私聊，输入 /exit 退出私聊", result.target)
@@ -402,3 +376,26 @@ func applyPrivateEnterResult(session *clientSession, result privateEnterResult) 
 	session.privateTarget = ""
 	return translatePrivateEnterError(result.code)
 }
+
+// printMainMenu 打印登录前菜单。
+func printMainMenu() {
+	fmt.Println("========== Go 聊天室 ==========")
+	fmt.Println("1. 登录")
+	fmt.Println("2. 注册")
+	fmt.Println("3. 退出")
+	fmt.Println("================================")
+}
+
+// printChatGuide 打印登录后的聊天命令说明。
+func printChatGuide() {
+	fmt.Println("[系统] 公聊命令:")
+	fmt.Println("[系统] 直接输入内容发送公聊消息")
+	fmt.Println("[系统] /chat 用户名 进入私聊")
+	fmt.Println("[系统] /list 查看在线用户")
+	fmt.Println("[系统] /exit 退出客户端")
+}
+
+// serverAddr 返回客户端默认连接的服务端地址。
+//func serverAddr() string {
+//	return defaultServerAddr
+//}
